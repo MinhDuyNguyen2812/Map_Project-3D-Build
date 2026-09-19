@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Select Area - Digital Twin Finland</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <style>
+        html, body, #map { height: 100%; margin: 0; padding: 0; }
+        #info-box {
+            position: absolute;
+            top: 10px; left: 50px;
+            z-index: 1000;
+            background: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: sans-serif;
+            font-size: 13px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div id="info-box">Click on the map to select the area center</div>
+    <div id="map"></div>
+
+    <script>
+        function initMap() {
+            const FINLAND_CENTER = [64.5, 26.0];
+            const FINLAND_BOUNDS = [[59.5, 19.0], [70.5, 32.0]];
+
+            const map = L.map('map', {
+                center:             FINLAND_CENTER,
+                zoom:               6,
+                maxBounds:          FINLAND_BOUNDS,
+                maxBoundsViscosity: 0.8
+            });
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors',
+                minZoom: 5,
+                maxZoom: 18
+            }).addTo(map);
+
+            let marker       = null;
+            let radiusCircle = null;
+            let currentRadius = 1000;
+
+            let pyBridge = null;
+            new QWebChannel(qt.webChannelTransport, function(channel) {
+                pyBridge = channel.objects.bridge;
+            });
+
+            map.on('click', function(e) {
+                const lat = e.latlng.lat;
+                const lon = e.latlng.lng;
+
+                if (marker)       map.removeLayer(marker);
+                if (radiusCircle) map.removeLayer(radiusCircle);
+
+                marker = L.marker([lat, lon]).addTo(map);
+                radiusCircle = L.circle([lat, lon], {
+                    radius:      currentRadius,
+                    color:       '#2a7de1',
+                    fillOpacity: 0.15
+                }).addTo(map);
+
+                document.getElementById('info-box').innerText =
+                    `Selected: lat=${lat.toFixed(6)}, lon=${lon.toFixed(6)} | radius=${currentRadius}m`;
+
+                if (pyBridge) {
+                    pyBridge.receive_coordinates(lat, lon, currentRadius);
+                }
+            });
+
+            window.updateRadius = function(newRadius) {
+                currentRadius = newRadius;
+                if (marker && radiusCircle) {
+                    const latlng = marker.getLatLng();
+                    radiusCircle.setRadius(newRadius);
+                    document.getElementById('info-box').innerText =
+                        `Selected: lat=${latlng.lat.toFixed(6)}, lon=${latlng.lng.toFixed(6)} | radius=${newRadius}m`;
+                }
+            };
+        }
+    </script>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            onload="initMap()">
+    </script>
+</body>
+</html>

@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Digital Twin Finland - 3D Viewport</title>
+    <script src="three.min.js"></script>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        html,body { width:100%; height:100%; overflow:hidden; background:#0d1117; }
+        #c { display:block; width:100%; height:100%; }
+        #loading {
+            position:absolute; inset:0; display:flex;
+            flex-direction:column; align-items:center; justify-content:center;
+            background:#0d1117; color:#00C9A7; font:14px 'Segoe UI',sans-serif; gap:16px;
+        }
+        .spinner { width:40px; height:40px; border:3px solid #1c2333;
+            border-top-color:#00C9A7; border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        #hud { position:absolute; top:12px; left:12px; font:12px 'Segoe UI',sans-serif;
+            color:#94a3b8; line-height:1.9; pointer-events:none; display:none; }
+        #hud .tag { color:#00C9A7; font-weight:700; letter-spacing:1px; font-size:11px; }
+        #hint { position:absolute; bottom:14px; right:14px; font:11px 'Segoe UI',sans-serif;
+            color:#3d4f6b; text-align:right; line-height:2; pointer-events:none; }
+        #compass { position:absolute; bottom:14px; left:14px;
+            width:60px; height:60px; pointer-events:none; display:none; }
+    </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="loading"><div class="spinner"></div><span>Loading 3D scene…</span></div>
+<div id="hud">
+    <div class="tag">DIGITAL TWIN FINLAND</div>
+    <div id="h-terrain">Terrain: —</div>
+    <div id="h-buildings">Buildings: —</div>
+    <div id="h-roads">Roads: —</div>
+    <div id="h-topodb">Topo layers: —</div>
+</div>
+<canvas id="compass" width="60" height="60"></canvas>
+<div id="hint">Left drag · Orbit &nbsp;|&nbsp; Right drag · Pan<br>Scroll · Zoom &nbsp;|&nbsp; Double-click · Focus</div>
+
+<script>
+// ── Renderer ──────────────────────────────────────────────────────────────────
+// Declare compass context early to avoid temporal dead zone errors
+const cCvs = document.getElementById('compass');
+const cCtx = cCvs ? cCvs.getContext('2d') : null;
+
+const canvas   = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+renderer.toneMapping       = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+scene.fog        = new THREE.FogExp2(0x0d1117, 0.00008);
+
+const camera = new THREE.PerspectiveCamera(50, 1, 1, 300000);
+
+function resize() {
+    const W=canvas.clientWidth, H=canvas.clientHeight;
+    renderer.setSize(W,H,false);
+    camera.aspect=W/H; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(canvas); resize();
+
+// ── Lighting ──────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x7090a0, 1.4));
+const sun = new THREE.DirectionalLight(0xfff0d0, 2.2);
+sun.castShadow=true;
+Object.assign(sun.shadow.mapSize,{width:2048,height:2048});
+sun.shadow.camera.near=1; sun.shadow.camera.far=80000;
+scene.add(sun);
+const skyLight = new THREE.DirectionalLight(0x4488cc, 0.6);
+skyLight.position.set(-5000,2500,5000);
+scene.add(skyLight);
+
+// ── Layer groups (for toggle) ─────────────────────────────────────────────────
+const groups = {
+    terrain:   new THREE.Group(),
+    buildings: new THREE.Group(),
+    roads:     new THREE.Group(),
+    topodb:    new THREE.Group(),
+};
+Object.values(groups).forEach(g => scene.add(g));
+
+// ── Camera orbit ──────────────────────────────────────────────────────────────
+let tgt=new THREE.Vector3(), radius=3000, theta=0.4, phi=0.9;
+let dTheta=0, dPhi=0, dRadius=0;
+const DAMP=0.12;
+
+function applyCamera() {
+    phi=Math.max(0.05,Math.min(Math.PI/2-0.01,phi));
+    camera.position.set(
+        tgt.x+radius*Math.sin(phi)*Math.sin(theta),
+        tgt.y-radius*Math.sin(phi)*Math.cos(theta),
+        tgt.z+radius*Math.cos(phi)
+    );
+    camera.lookAt(tgt);
+    drawCompass();
+}
+applyCamera();
+
+let drag=false, rDrag=false, lx=0, ly=0;
+canvas.addEventListener('mousedown',e=>{drag=true;rDrag=e.button===2;lx=e.clientX;ly=e.clientY;dTheta=dPhi=0;});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+window.addEventListener('mouseup',()=>{drag=false;});
+window.addEventListener('mousemove',e=>{
+    if(!drag)return;
+    const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+    if(rDrag){
+        const speed=radius*0.0008;
+        const fwd=new THREE.Vector3().subVectors(tgt,camera.position).setZ(0).normalize();
+        const right=new THREE.Vector3().crossVectors(fwd,new THREE.Vector3(0,0,1)).normalize();
+        tgt.addScaledVector(right,-dx*speed); tgt.addScaledVector(fwd,dy*speed);
+    } else {
+        const s=Math.max(0.0002, radius*0.0000008);
+        dTheta=-dx*s; dPhi=-dy*s;
+    }
+    applyCamera();
+});
+canvas.addEventListener('wheel',e=>{e.preventDefault();dRadius=e.deltaY*radius*0.001;},{passive:false});
+canvas.addEventListener('dblclick',e=>{
+    const rect=canvas.getBoundingClientRect();
+    const mouse=new THREE.Vector2(
+        ((e.clientX-rect.left)/rect.width)*2-1,
+        -((e.clientY-rect.top)/rect.height)*2+1
+    );
+    const ray=new THREE.Raycaster(); ray.setFromCamera(mouse,camera);
+    const hits=ray.intersectObjects(scene.children,true);
+    if(hits.length){tgt.copy(hits[0].point); dRadius=-radius*0.4;}
+});
+window.addEventListener('resize',()=>{camera.aspect=canvas.clientWidth/canvas.clientHeight;camera.updateProjectionMatrix();renderer.setSize(canvas.clientWidth,canvas.clientHeight,false);});
+
+function animate(){
+    requestAnimationFrame(animate);
+    if(Math.abs(dTheta)>0.0001){theta+=dTheta*DAMP;dTheta*=(1-DAMP);}
+    if(Math.abs(dPhi)>0.0001){phi+=dPhi*DAMP;dPhi*=(1-DAMP);}
+    if(Math.abs(dRadius)>0.1){radius+=dRadius*DAMP;radius=Math.max(30,Math.min(80000,radius));dRadius*=(1-DAMP);}
+    applyCamera();
+    renderer.render(scene,camera);
+}
+animate();
+
+// ── Compass ───────────────────────────────────────────────────────────────────
+function drawCompass(){
+    if(!cCtx) return;
+    cCtx.clearRect(0,0,60,60);
+    cCtx.beginPath();cCtx.arc(30,30,28,0,Math.PI*2);
+    cCtx.fillStyle='rgba(13,17,23,0.82)';cCtx.fill();
+    cCtx.strokeStyle='#1c2d40';cCtx.lineWidth=1.5;cCtx.stroke();
+    cCtx.save();cCtx.translate(30,30);cCtx.rotate(-theta);
+    cCtx.beginPath();cCtx.moveTo(0,2);cCtx.lineTo(0,-22);
+    cCtx.strokeStyle='#ef4444';cCtx.lineWidth=2.5;cCtx.stroke();
+    cCtx.beginPath();cCtx.moveTo(0,-2);cCtx.lineTo(0,22);
+    cCtx.strokeStyle='#64748b';cCtx.lineWidth=2;cCtx.stroke();
+    cCtx.restore();
+    cCtx.fillStyle='#ef4444';cCtx.font='bold 9px Segoe UI';
+    cCtx.textAlign='center';cCtx.textBaseline='middle';
+    cCtx.fillText('N',30,9);
+}
+
+// ── Geometry helpers ──────────────────────────────────────────────────────────
+function elevationColor(z,zMin,zMax){
+    const t=Math.max(0,Math.min(1,(z-zMin)/(zMax-zMin||1)));
+    if(t<0.5){
+        return new THREE.Color(
+            THREE.MathUtils.lerp(0.18,0.55,t*2),
+            THREE.MathUtils.lerp(0.35,0.42,t*2),
+            THREE.MathUtils.lerp(0.15,0.08,t*2)
+        );
+    } else {
+        const u=(t-0.5)*2;
+        return new THREE.Color(
+            THREE.MathUtils.lerp(0.55,0.95,u),
+            THREE.MathUtils.lerp(0.42,0.93,u),
+            THREE.MathUtils.lerp(0.08,0.90,u)
+        );
+    }
+}
+
+function buildGeo(vertices, triangles, withElevColor=false, zMin=0, zMax=1, uvs=null){
+    const pos=new Float32Array(vertices.length*3);
+    const col=withElevColor ? new Float32Array(vertices.length*3) : null;
+    vertices.forEach(([x,y,z],i)=>{
+        pos[i*3]=x; pos[i*3+1]=y; pos[i*3+2]=z;
+        if(col){const c=elevationColor(z,zMin,zMax);col[i*3]=c.r;col[i*3+1]=c.g;col[i*3+2]=c.b;}
+    });
+    const idx=new Uint32Array(triangles.length*3);
+    triangles.forEach(([a,b,c],i)=>{idx[i*3]=a;idx[i*3+1]=b;idx[i*3+2]=c;});
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+    if(col) geo.setAttribute('color',new THREE.BufferAttribute(col,3));
+    if(uvs){
+        const uv=new Float32Array(uvs.length*2);
+        uvs.forEach(([u,v],i)=>{uv[i*2]=u; uv[i*2+1]=v;});
+        geo.setAttribute('uv',new THREE.BufferAttribute(uv,2));
+    }
+    geo.setIndex(new THREE.BufferAttribute(idx,1));
+    geo.computeVertexNormals();
+    return geo;
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+function loadSceneFromData(terrainData, buildingsData, roadsData, terrainDbData, orthophotoUrl=null){
+
+    // Terrain
+    if(terrainData && terrainData.vertices && terrainData.vertices.length>0){
+        const zVals=terrainData.vertices.map(v=>v[2]);
+        const zMin=Math.min(...zVals), zMax=Math.max(...zVals);
+        const uvs=terrainData.uvs || null;
+        const geo=buildGeo(terrainData.vertices, terrainData.triangles, !orthophotoUrl, zMin, zMax, uvs);
+
+        let mat;
+        if(orthophotoUrl){
+            // Use orthophoto as texture
+            const tex=new THREE.TextureLoader().load(orthophotoUrl);
+            tex.flipY=true;   // WMTS north-at-top: Three.js needs flipY=true
+            mat=new THREE.MeshStandardMaterial({map:tex, roughness:0.85, metalness:0.0});
+            document.getElementById('h-terrain').textContent+=' · Orthophoto texture';
+        } else {
+            // Fallback: elevation color
+            mat=new THREE.MeshStandardMaterial({vertexColors:true,roughness:0.85});
+        }
+        const mesh=new THREE.Mesh(geo,mat);
+        mesh.receiveShadow=true;
+        groups.terrain.add(mesh);
+
+        geo.computeBoundingBox();
+        const center=new THREE.Vector3(); geo.boundingBox.getCenter(center);
+        tgt.copy(center);
+        const size=new THREE.Vector3(); geo.boundingBox.getSize(size);
+        radius=Math.max(size.x,size.y)*0.7; phi=0.8;
+
+        const s=Math.max(size.x,size.y)*0.6;
+        sun.position.set(center.x+size.x*0.4,center.y-size.y*0.3,center.z+size.z*2+3000);
+        ['left','bottom'].forEach(k=>sun.shadow.camera[k]=-s);
+        ['right','top'].forEach(k=>sun.shadow.camera[k]=s);
+        sun.shadow.camera.far=size.z*4+8000;
+        sun.shadow.camera.updateProjectionMatrix();
+
+        document.getElementById('h-terrain').textContent=
+            `Terrain: ${terrainData.vertices.length.toLocaleString()} pts · Z ${zMin.toFixed(0)}–${zMax.toFixed(0)} m`;
+    }
+
+    // Buildings — solid blocks, light reddish-brown
+    if(buildingsData && buildingsData.length>0){
+        const bMat = new THREE.MeshStandardMaterial({
+            color:     0xc4856a,   // light reddish-brown
+            roughness: 0.7,
+            metalness: 0.05,
+            side:      THREE.DoubleSide,  // render both sides — fixes inverted normals
+        });
+        buildingsData.forEach(b=>{
+            const geo  = buildGeo(b.vertices, b.triangles);
+            const mesh = new THREE.Mesh(geo, bMat);
+            mesh.castShadow    = true;
+            mesh.receiveShadow = true;
+            groups.buildings.add(mesh);
+        });
+        document.getElementById('h-buildings').textContent=`Buildings: ${buildingsData.length}`;
+    }
+
+    // Compute terrain Z range for elevation correction
+    // Use reduce instead of spread to avoid stack overflow with large vertex arrays
+    const terrainZs   = terrainData.vertices ? terrainData.vertices.map(v=>v[2]) : [0];
+    const terrainZMin = terrainZs.reduce((a,b)=>Math.min(a,b), Infinity);
+    const terrainZMax = terrainZs.reduce((a,b)=>Math.max(a,b), -Infinity);
+
+    // Helper: if vertices have old Z≈0 data, shift above ALL terrain (terrainZMax)
+    function fixZ(vertices, label) {
+        if(!vertices.length) return vertices;
+        const vZ = vertices[0][2];
+        if(Math.abs(vZ) < 1.0 && terrainZMin > 1.0) {
+            const shift = terrainZMax + 0.5;
+            console.log(`[fixZ] ${label}: Z=${vZ.toFixed(2)} → shifted to ${(vZ+shift).toFixed(2)}`);
+            return vertices.map(([x,y,z])=>[x,y,z+shift]);
+        }
+        return vertices;
+    }
+
+    // Debug roads
+    console.log('[Roads] roadsData type:', typeof roadsData, 'length:', roadsData ? roadsData.length : 'null');
+    if(roadsData && roadsData.length > 0){
+        console.log('[Roads] first segment:', JSON.stringify(roadsData[0]).substring(0,200));
+        console.log('[Roads] first vertex Z:', roadsData[0].vertices && roadsData[0].vertices[0] ? roadsData[0].vertices[0][2] : 'no vertices');
+    }
+
+    // Roads
+    if(roadsData && roadsData.length>0){
+        const roadMat = new THREE.MeshStandardMaterial({
+            color:        0x888899,
+            roughness:    0.9,
+            metalness:    0.0,
+            side:         THREE.DoubleSide,
+            polygonOffset: true,
+            polygonOffsetFactor: -2,
+            polygonOffsetUnits:  -2,
+        });
+        roadsData.forEach(r=>{
+            const verts = fixZ(r.vertices, "road");
+            const geo   = buildGeo(verts, r.triangles);
+            const mesh  = new THREE.Mesh(geo, roadMat);
+            mesh.renderOrder = 1;
+            groups.roads.add(mesh);
+        });
+        document.getElementById('h-roads').textContent=`Roads: ${roadsData.length} segments`;
+    } else {
+        document.getElementById('h-roads').textContent='Roads: none';
+    }
+
+    // Topographic DB layers
+    if(terrainDbData && terrainDbData.length>0){
+        let totalMeshes=0;
+        terrainDbData.forEach(layer=>{
+            const [r,g,b]=layer.color;
+            const mat=new THREE.MeshStandardMaterial({
+                color:new THREE.Color(r,g,b), roughness:0.8, metalness:0.0,
+                transparent:true, opacity:0.85, side:THREE.DoubleSide
+            });
+            layer.meshes.forEach(m=>{
+                const geo=buildGeo(fixZ(m.vertices), m.triangles);
+                groups.topodb.add(new THREE.Mesh(geo,mat));
+                totalMeshes++;
+            });
+        });
+        const labels=terrainDbData.map(l=>l.label).join(', ');
+        document.getElementById('h-topodb').textContent=`Topo DB: ${labels} (${totalMeshes} meshes)`;
+    } else {
+        document.getElementById('h-topodb').textContent='Topo DB: none';
+    }
+
+    document.getElementById('loading').style.display='none';
+    document.getElementById('hud').style.display='block';
+    document.getElementById('compass').style.display='block';
+    applyCamera();
+}
+
+// ── Controls from Python toolbar ──────────────────────────────────────────────
+function toggleTerrain(on)   { groups.terrain.visible=on;   }
+function toggleBuildings(on) { groups.buildings.visible=on; }
+function toggleRoads(on)     { groups.roads.visible=on;     }
+function toggleTopoDB(on)    { groups.topodb.visible=on;    }
+
+function setWireframe(on){
+    scene.traverse(o=>{
+        if(o.isMesh && o.material && !o.material.isLineBasicMaterial)
+            o.material.wireframe=on;
+    });
+}
+
+function resetCamera(){ dTheta=dPhi=dRadius=0; theta=0.4; phi=0.8; applyCamera(); }
+</script>
+</body>
+</html>
