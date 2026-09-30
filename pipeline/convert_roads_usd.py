@@ -19,7 +19,7 @@ def _sample_elevation(dataset, xs, ys):
     """Sample DEM elevation for a list of EPSG:3067 (x, y) coordinates."""
     coords = list(zip(xs, ys))
     try:
-        elevs = [val[0] for val in dataset.sample(coords)]
+        elevs = [float(val[0]) for val in dataset.sample(coords)]
         nodata = dataset.nodata
         if nodata is not None:
             elevs = [e if e != nodata else 0.0 for e in elevs]

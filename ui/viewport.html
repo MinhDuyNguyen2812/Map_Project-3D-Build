@@ -215,9 +215,19 @@ function loadSceneFromData(terrainData, buildingsData, roadsData, terrainDbData,
         let mat;
         if(orthophotoUrl){
             // Use orthophoto as texture
-            const tex=new THREE.TextureLoader().load(orthophotoUrl);
-            tex.flipY=true;   // WMTS north-at-top: Three.js needs flipY=true
-            mat=new THREE.MeshStandardMaterial({map:tex, roughness:0.85, metalness:0.0});
+            const tex=new THREE.TextureLoader().load(
+                orthophotoUrl,
+                loaded=>{
+                    loaded.flipY=true;   // WMTS north-at-top: Three.js needs flipY=true
+                    if('encoding' in loaded && THREE.sRGBEncoding !== undefined)
+                        loaded.encoding=THREE.sRGBEncoding;
+                    loaded.needsUpdate=true;
+                },
+                undefined,
+                error=>console.error('[Terrain] Orthophoto texture failed to load:', error)
+            );
+            // Keep the image visible regardless of the directional light setup.
+            mat=new THREE.MeshBasicMaterial({map:tex, side:THREE.DoubleSide});
             document.getElementById('h-terrain').textContent+=' · Orthophoto texture';
         } else {
             // Fallback: elevation color
@@ -290,7 +300,8 @@ function loadSceneFromData(terrainData, buildingsData, roadsData, terrainDbData,
     // Roads
     if(roadsData && roadsData.length>0){
         const roadMat = new THREE.MeshStandardMaterial({
-            color:        0x888899,
+            color:        0xef4444,
+            emissive:     0x4a0000,
             roughness:    0.9,
             metalness:    0.0,
             side:         THREE.DoubleSide,
@@ -320,7 +331,7 @@ function loadSceneFromData(terrainData, buildingsData, roadsData, terrainDbData,
                 transparent:true, opacity:0.85, side:THREE.DoubleSide
             });
             layer.meshes.forEach(m=>{
-                const geo=buildGeo(fixZ(m.vertices), m.triangles);
+                const geo=buildGeo(m.vertices, m.triangles);
                 groups.topodb.add(new THREE.Mesh(geo,mat));
                 totalMeshes++;
             });

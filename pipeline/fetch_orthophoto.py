@@ -18,6 +18,7 @@ import os
 import io
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from dotenv import load_dotenv
 from utils.geo import get_bounding_box, latlon_to_etrs
@@ -50,6 +51,7 @@ def fetch_orthophoto(
     center_lon: float,
     radius_meters: float,
     output_path: str = "./output/orthophoto.png",
+    progress_callback=None,
 ) -> str:
     """
     Download and stitch WMTS orthophoto tiles into a single PNG.
@@ -85,23 +87,42 @@ def fetch_orthophoto(
     canvas = Image.new("RGB", (n_cols * TILE_PX, n_rows * TILE_PX), (200, 200, 200))
     ok     = 0
 
-    for row in range(row_min, row_max + 1):
-        for col in range(col_min, col_max + 1):
-            url = (f"{WMTS_BASE}/{LAYER}/default/{TILESET}"
-                   f"/{ZOOM}/{row}/{col}.png?api-key={api_key}")
-            try:
-                r = requests.get(url, timeout=20)
-                if r.status_code == 200 and len(r.content) > 500:
-                    tile = Image.open(io.BytesIO(r.content)).convert("RGB")
-                    x    = (col - col_min) * TILE_PX
-                    y    = (row - row_min) * TILE_PX
-                    canvas.paste(tile, (x, y))
-                    ok  += 1
-                else:
-                    print(f"  ⚠ Tile ({col},{row}): HTTP {r.status_code} / "
-                          f"{len(r.content)} bytes")
-            except Exception as e:
-                print(f"  ⚠ Tile ({col},{row}): {e}")
+    tile_positions = [
+        (col, row)
+        for row in range(row_min, row_max + 1)
+        for col in range(col_min, col_max + 1)
+    ]
+
+    def _download_tile(position):
+        col, row = position
+        url = (f"{WMTS_BASE}/{LAYER}/default/{TILESET}"
+               f"/{ZOOM}/{row}/{col}.png?api-key={api_key}")
+        try:
+            response = requests.get(url, timeout=20)
+            if response.status_code == 200 and len(response.content) > 500:
+                tile = Image.open(io.BytesIO(response.content)).convert("RGB")
+                return col, row, tile, None
+            return col, row, None, (
+                f"HTTP {response.status_code} / {len(response.content)} bytes"
+            )
+        except Exception as error:
+            return col, row, None, str(error)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(_download_tile, position) for position in tile_positions]
+        for future in as_completed(futures):
+            col, row, tile, error = future.result()
+            completed += 1
+            if tile is not None:
+                x = (col - col_min) * TILE_PX
+                y = (row - row_min) * TILE_PX
+                canvas.paste(tile, (x, y))
+                ok += 1
+            else:
+                print(f"  ⚠ Tile ({col},{row}): {error}")
+            if progress_callback:
+                progress_callback(completed, total)
 
     if ok == 0:
         raise RuntimeError(

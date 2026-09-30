@@ -48,6 +48,16 @@ class PipelineWorker(QThread):
             terrain_db_usd = "./output/terrain_db.usda"
             scene_usd      = "./output/scene.usda"
 
+            # Remove optional topo outputs from an earlier run before fetching
+            # fresh layers, so failed or empty requests cannot show stale data.
+            for old_path in (terrain_db_usd, terrain_db_usd.replace(".usda", ".json")):
+                if os.path.exists(old_path):
+                    os.remove(old_path)
+            for old_path in ("wetlands", "parks", "cemeteries"):
+                old_geojson = f"./output/terrain_{old_path}.geojson"
+                if os.path.exists(old_geojson):
+                    os.remove(old_geojson)
+
             lat, lon, radius = self.lat, self.lon, self.radius
 
             # ── Step 1: Fetch DEM (must be first — provides terrain_origin) ──
@@ -83,7 +93,16 @@ class PipelineWorker(QThread):
                 if os.path.exists(ortho_path):
                     os.remove(ortho_path)
                     print("[Orthophoto] Deleted old file, fetching fresh...")
-                fetch_orthophoto(lat, lon, radius, ortho_path)
+                fetch_orthophoto(
+                    lat,
+                    lon,
+                    radius,
+                    ortho_path,
+                    progress_callback=lambda done, total: self.progress.emit(
+                        32 + min(7, done * 7 // total),
+                        f"Orthophoto tiles ({done}/{total})..."
+                    ),
+                )
                 return "orthophoto"
 
             def _fetch_roads():
